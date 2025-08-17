@@ -1,0 +1,831 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Space Shooter Game</title>
+  <style>
+    body { margin: 0; background: #000; overflow: hidden; }
+    #ui { position: absolute; top: 10px; left: 10px; z-index: 10; color: #fff; font-family: sans-serif; font-size: 20px; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+  <div id="ui">
+    <!-- Removed redundant yellow scoreboard -->
+    <button id="pauseBtn" style="font-size:20px;padding:4px 16px;margin-bottom:8px;">Pause</button>
+  </div>
+  <canvas id="gameCanvas"></canvas>
+  <script>
+    // Canvas setup
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    function resize() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    // Game state
+    let score = 0;
+    const player = {
+      x: canvas.width / 2,
+      y: canvas.height - 80,
+      w: 60,
+      h: 40,
+      speed: 7,
+      color: '#0ff',
+      cooldown: 0,
+      alive: true,
+      homingMissiles: 0,
+      homingTimer: 0
+    };
+    const missiles = [];
+    const enemies = [];
+    let left = false, right = false, space = false, hKey = false;
+    let wave = 1;
+    let waveActive = false;
+    let bossActive = false;
+    let boss = null;
+    let bossMissileTimer = 0;
+    let playerMissilesLeft = 22;
+    let rapidFireActive = false;
+    let rapidFireTimer = 0;
+    const powerUps = [];
+    let disruptors = 0;
+    let disruptorActive = false;
+    let disruptorTimer = 0;
+
+    // Controls
+    let rightMouseDown = false;
+    let leftMouseDown = false;
+    let restartKey = false;
+    document.addEventListener('keydown', e => {
+      if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') left = true;
+      if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') right = true;
+      if (e.code === 'Space') space = true;
+      if (e.key === 'h' || e.key === 'H') hKey = true;
+      if (e.key === 'r' || e.key === 'R') restartKey = true;
+      if (e.key === 'q' || e.key === 'Q') window.disruptorKey = true;
+    });
+    document.addEventListener('keyup', e => {
+      if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') left = false;
+      if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') right = false;
+      if (e.code === 'Space') space = false;
+      if (e.key === 'h' || e.key === 'H')   hKey = false;
+      if (e.key === 'r' || e.key === 'R') restartKey = false;
+      if (e.key === 'q' || e.key === 'Q') window.disruptorKey = false;
+    });
+    canvas.addEventListener('contextmenu', e => e.preventDefault());
+    canvas.addEventListener('mousedown', e => {
+      if (e.button === 2) rightMouseDown = true;
+      if (e.button === 0) leftMouseDown = true;
+    });
+    canvas.addEventListener('mouseup', e => {
+      if (e.button === 2) rightMouseDown = false;
+      if (e.button === 0) leftMouseDown = false;
+    });
+
+    // Enemy plane spawn
+    function spawnWave(waveNum) {
+      enemies.length = 0;
+      missiles.length = 0;
+      powerUps.length = 0;
+      bossActive = false;
+      boss = null;
+      bossMissileTimer = 0;
+      if (waveNum % 5 === 0) { // Boss every 5 waves
+        // Boss wave
+        bossActive = true;
+        // Pick boss type
+        const bossTypes = [
+          {
+            name: 'Missile Barrager',
+            color: '#f0f',
+            shape: 'diamond',
+            hp: 25,
+            behavior: function() {
+              // Moves horizontally, fires 7 missiles in a wide fan every 2s
+              boss.x += boss.vx;
+              boss.y = 60 + Math.sin(Date.now() / 600) * 40;
+              if (boss.x < 0) { boss.x = 0; boss.vx *= -1; }
+              if (boss.x > canvas.width - boss.w) { boss.x = canvas.width - boss.w; boss.vx *= -1; }
+              bossMissileTimer--;
+              if (bossMissileTimer <= 0) {
+                const missileCount = 7;
+                for (let i = 0; i < missileCount; i++) {
+                  const angle = Math.PI/2 + (i - (missileCount-1)/2) * (Math.PI/7);
+                  const speed = 8;
+                  const vx = Math.cos(angle) * speed;
+                  const vy = Math.sin(angle) * speed;
+                  missiles.push({
+                    x: boss.x + boss.w/2 - 6,
+                    y: boss.y + boss.h - 10,
+                    w: 12,
+                    h: 32,
+                    speed: speed,
+                    color: '#f44',
+                    fromPlayer: false,
+                    homing: false,
+                    target: null,
+                    vx: vx,
+                    vy: vy
+                  });
+                }
+                bossMissileTimer = 120; // 2s
+              }
+            }
+          },
+          {
+            name: 'Homing Commander',
+            color: '#0f0',
+            shape: 'plane2',
+            hp: 20,
+            behavior: function() {
+              // Moves in a circle, fires 3 homing missiles at player every 3s
+              boss.x = canvas.width/2 + Math.cos(Date.now()/700) * 220 - boss.w/2;
+              boss.y = 120 + Math.sin(Date.now()/700) * 80;
+              bossMissileTimer--;
+              if (bossMissileTimer <= 0) {
+                for (let i = 0; i < 3; i++) {
+                  // Homing missile aimed at player
+                  const dx = (player.x + player.w/2) - (boss.x + boss.w/2);
+                  const dy = (player.y + player.h/2) - (boss.y + boss.h);
+                  const len = Math.sqrt(dx*dx + dy*dy);
+                  const vx = (dx/len) * 8;
+                  const vy = (dy/len) * 8;
+                  missiles.push({
+                    x: boss.x + boss.w/2 - 6,
+                    y: boss.y + boss.h - 10,
+                    w: 12,
+                    h: 32,
+                    speed: 8,
+                    color: '#0f0',
+                    fromPlayer: false,
+                    homing: true,
+                    target: player,
+                    vx: vx,
+                    vy: vy
+                  });
+                }
+                bossMissileTimer = 180; // 3s
+              }
+            }
+          },
+          {
+            name: 'Fragment King',
+            color: '#ff0',
+            shape: 'rectangle',
+            hp: 30,
+            behavior: function() {
+              // Moves up and down, fires 5 missiles straight down every 1.5s, shoots extra fragments when hit
+              boss.x = canvas.width/2 - boss.w/2;
+              boss.y = 60 + Math.sin(Date.now()/400) * 120;
+              bossMissileTimer--;
+              if (bossMissileTimer <= 0) {
+                for (let i = 0; i < 5; i++) {
+                  missiles.push({
+                    x: boss.x + 40 + i*32,
+                    y: boss.y + boss.h - 10,
+                    w: 12,
+                    h: 32,
+                    speed: 10,
+                    color: '#ff0',
+                    fromPlayer: false,
+                    homing: false,
+                    target: null,
+                    vx: 0,
+                    vy: 10
+                  });
+                }
+                bossMissileTimer = 90; // 1.5s
+              }
+            }
+          }
+        ];
+        // Pick boss type based on wave
+        const bossType = bossTypes[(Math.floor(waveNum/5)-1) % bossTypes.length];
+        boss = {
+          x: canvas.width/2 - 120,
+          y: 60,
+          w: 240,
+          h: 100,
+          vx: 4 * (Math.random() < 0.5 ? 1 : -1),
+          vy: 1.5,
+          hp: bossType.hp,
+          maxHp: bossType.hp,
+          color: bossType.color,
+          alive: true,
+          shape: bossType.shape,
+          behavior: bossType.behavior,
+          name: bossType.name
+        };
+        bossMissileTimer = 60; // start timer
+      } else {
+        // Normal wave
+        const baseCooldown = 300;
+        const cooldownReduction = Math.floor((waveNum - 1) * 3);
+        for (let i = 0; i < 3 + waveNum; i++) {
+          const w = 60, h = 40;
+          enemies.push({
+            x: 80 + i * 100,
+            y: 80 + Math.random() * 120,
+            w: w,
+            h: h,
+            speed: 3.5 + 0.5 * waveNum + Math.random() * 1.5,
+            color: '#f44',
+            missileCooldown: baseCooldown - cooldownReduction + Math.random() * 30,
+            alive: true,
+            vx: (Math.random() < 0.5 ? 1 : -1) * (2 + Math.random() * 2),
+            vy: (Math.random() - 0.5) * 1.5,
+            hp: 10,
+            maxHp: 10,
+            onFire: false
+          });
+        }
+      }
+      waveActive = true;
+    }
+    spawnWave(wave);
+
+    // Homing missile timer
+    setInterval(() => {
+      if (player.alive) player.homingMissiles++;
+    }, 20000);
+    // Disruptor timer: gain one every 30s
+    setInterval(() => {
+      if (player.alive) disruptors++;
+    }, 30000);
+
+    // Pause functionality
+    let paused = false;
+    document.getElementById('pauseBtn').onclick = function() {
+      paused = !paused;
+      this.textContent = paused ? 'Resume' : 'Pause';
+    };
+
+    // Game loop
+    function update() {
+      if (!player.alive) return;
+      // Player movement
+      if (left) player.x -= player.speed;
+      if (right) player.x += player.speed;
+      player.x = Math.max(0, Math.min(canvas.width - player.w, player.x));
+      // Power-up spawn (random chance per frame, only if none present)
+      // REMOVE random spawn, now crates drop from enemies
+      // Power-up movement and collision
+      for (let i = powerUps.length - 1; i >= 0; i--) {
+        const p = powerUps[i];
+        p.y += p.vy;
+        if (p.y > canvas.height + 40) powerUps.splice(i, 1);
+        else if (
+          p.x < player.x + player.w && p.x + p.w > player.x &&
+          p.y < player.y + player.h && p.y + p.h > player.y
+        ) {
+          if (p.type === 'rapid') {
+            rapidFireActive = true;
+            rapidFireTimer = 1800; // 30s at 60fps
+          } else if (p.type === 'missiles') {
+            playerMissilesLeft += 10;
+          } else if (p.type === 'homing') {
+            player.homingMissiles += 1;
+          }
+          powerUps.splice(i, 1);
+        }
+      }
+      if (rapidFireActive) {
+        rapidFireTimer--;
+        if (rapidFireTimer <= 0) rapidFireActive = false;
+      }
+      // Player shooting (missiles, white, 0.5s fire rate, unlimited)
+      let fireCooldown = 30; // 0.5s
+      if ((space || leftMouseDown) && player.cooldown <= 0) {
+        missiles.push({
+          x: player.x + player.w/2 - 6,
+          y: player.y - 24,
+          w: 12,
+          h: 32,
+          speed: 13,
+          color: '#fff', // white missile
+          fromPlayer: true,
+          homing: false,
+          target: null
+        });
+        player.cooldown = fireCooldown;
+        leftMouseDown = false;
+      }
+      // Homing missile firing (H or right click)
+      if ((hKey || rightMouseDown) && player.homingMissiles > 0 && player.alive) {
+        // Find nearest alive enemy
+        let nearest = null, minDist = 1e9;
+        for (const e of enemies) {
+          if (!e.alive) continue;
+          const dx = (e.x + e.w/2) - (player.x + player.w/2);
+          const dy = (e.y + e.h/2) - player.y;
+          const dist = dx*dx + dy*dy;
+          if (dist < minDist) { minDist = dist; nearest = e; }
+        }
+        if (nearest) {
+          missiles.push({
+            x: player.x + player.w/2 - 6,
+            y: player.y - 24,
+            w: 12,
+            h: 32,
+            speed: 13,
+            color: '#0f0',
+            fromPlayer: true,
+            homing: true,
+            target: nearest
+          });
+          player.homingMissiles--;
+        }
+        hKey = false;
+        rightMouseDown = false;
+      }
+      if (player.cooldown > 0) player.cooldown--;
+      // Update player missiles
+      for (let i = missiles.length - 1; i >= 0; i--) {
+        const m = missiles[i];
+        if (m.fromPlayer) {
+          if (m.homing && m.target && m.target.alive) {
+            // Homing logic
+            const tx = m.target.x + m.target.w/2;
+            const ty = m.target.y + m.target.h/2;
+            const dx = tx - (m.x + m.w/2);
+            const dy = ty - m.y;
+            const len = Math.sqrt(dx*dx + dy*dy);
+            if (len > 1) {
+              m.x += (dx/len) * m.speed * 0.7;
+              m.y += (dy/len) * m.speed * 0.7;
+            } else {
+              m.y -= m.speed;
+            }
+          } else {
+            m.y -= m.speed;
+          }
+        } else if (m.isFragment) {
+          // Fragment logic
+          m.x += m.vx;
+          m.y += m.vy;
+          m.vy += 0.1; // gravity for fragments
+        } else {
+          // Enemy missile: use vx/vy if present
+          if (typeof m.vx === 'number' && typeof m.vy === 'number') {
+            m.x += m.vx;
+            m.y += m.vy;
+          } else {
+            m.y += m.speed;
+          }
+        }
+        // Remove if out of bounds
+        if (m.y < -40 || m.y > canvas.height + 40 || m.x < -40 || m.x > canvas.width + 40) missiles.splice(i, 1);
+      }
+      // Enemy AI
+      for (const e of enemies) {
+        if (!e.alive) continue;
+        // Move randomly but only on enemy side (top half)
+        e.x += e.vx;
+        e.y += e.vy;
+        // Bounce off left/right walls
+        if (e.x < 0) { e.x = 0; e.vx *= -1; }
+        if (e.x > canvas.width - e.w) { e.x = canvas.width - e.w; e.vx *= -1; }
+        // Stay in top half
+        if (e.y < 40) { e.y = 40; e.vy *= -1; }
+        if (e.y > canvas.height/2 - e.h) { e.y = canvas.height/2 - e.h; e.vy *= -1; }
+        // Fire missile
+        e.missileCooldown--;
+        if (e.missileCooldown <= 0) {
+          // 40% chance to miss
+          let targetX = player.x + player.w/2;
+          if (Math.random() < 0.4) {
+            // Miss: aim left or right off the player
+            targetX += (Math.random() < 0.5 ? -1 : 1) * (80 + Math.random() * 120);
+          }
+          // Calculate direction
+          const dx = targetX - (e.x + e.w/2);
+          const dy = (player.y + player.h/2) - (e.y + e.h);
+          const len = Math.sqrt(dx*dx + dy*dy);
+          const missileVx = (dx/len) * 3.5; // slower enemy missile
+          const missileVy = (dy/len) * 3.5;
+          missiles.push({
+            x: e.x + e.w/2 - 6,
+            y: e.y + e.h,
+            w: 12,
+            h: 32,
+            speed: 3.5,
+            color: '#f44',
+            fromPlayer: false,
+            homing: false,
+            target: null,
+            vx: missileVx,
+            vy: missileVy
+          });
+          e.missileCooldown = 300 + Math.random() * 30; // reset to ~5s
+        }
+      }
+      // Boss movement and missile firing
+      if (bossActive && boss && boss.alive) {
+        boss.behavior();
+      }
+      // Collisions: player missile (homing or not) vs enemy
+      for (let i = missiles.length - 1; i >= 0; i--) {
+        const m = missiles[i];
+        if (!m.fromPlayer) continue;
+        // Boss collision
+        if (bossActive && boss && boss.alive &&
+          m.x < boss.x + boss.w && m.x + m.w > boss.x &&
+          m.y < boss.y + boss.h && m.y + m.h > boss.y) {
+          boss.hp--;
+          // Boss shoots fragments when hit
+          for (let f = 0; f < 7; f++) {
+            const angle = (2 * Math.PI / 7) * f + Math.random() * 0.2;
+            const speed = 7 + Math.random() * 2;
+            const fragVx = Math.cos(angle) * speed;
+            const fragVy = Math.sin(angle) * speed;
+            missiles.push({
+              x: boss.x + boss.w/2 - 6,
+              y: boss.y + boss.h/2 - 6,
+              w: 12,
+              h: 12,
+              speed: speed,
+              color: '#0ff',
+              fromPlayer: false,
+              homing: false,
+              target: null,
+              vx: fragVx,
+              vy: fragVy,
+              isFragment: true
+            });
+          }
+          if (boss.hp <= 0) {
+            boss.alive = false;
+            score += 10;
+            bossActive = false;
+            setTimeout(() => spawnWave(++wave), 1200);
+            waveActive = false;
+          }
+          missiles.splice(i, 1);
+          continue;
+        }
+        for (let j = enemies.length - 1; j >= 0; j--) {
+          const e = enemies[j];
+          if (!e.alive) continue;
+          // Missile collision box
+          if (
+            m.x < e.x + e.w && m.x + m.w > e.x &&
+            m.y < e.y + e.h && m.y + m.h > e.y
+          ) {
+            // Missile explodes
+            const centerX = e.x + e.w/2;
+            const centerY = e.y + e.h/2;
+            const fragmentCount = 7 + (wave - 1);
+            for (let f = 0; f < fragmentCount; f++) {
+              const angle = (2 * Math.PI / fragmentCount) * f + Math.random() * 0.2;
+              const speed = 5 + Math.random() * 2;
+              const fragVx = Math.cos(angle) * speed;
+              const fragVy = Math.sin(angle) * speed;
+              missiles.push({
+                x: centerX - 6,
+                y: centerY - 6,
+                w: 12,
+                h: 12,
+                speed: speed,
+                color: '#ff0',
+                fromPlayer: false,
+                homing: false,
+                target: null,
+                vx: fragVx,
+                vy: fragVy,
+                isFragment: true
+              });
+            }
+            e.alive = false;
+            score++;
+            missiles.splice(i, 1);
+            break;
+          }
+        }
+      }
+      // Collisions: enemy missile and fragment vs player
+      for (let i = missiles.length - 1; i >= 0; i--) {
+        const m = missiles[i];
+        if (!m.fromPlayer && !disruptorActive &&
+          m.x < player.x + player.w && m.x + m.w > player.x &&
+          m.y < player.y + player.h && m.y + m.h > player.y) {
+          player.alive = false;
+        }
+      }
+      // Remove dead enemies
+      if (waveActive && !bossActive && enemies.every(e => !e.alive)) {
+        wave++;
+        setTimeout(() => spawnWave(wave), 1200);
+        waveActive = false;
+      }
+      // Disruptor activation (press Q)
+      if (!disruptorActive && disruptors > 0 && window.disruptorKey) {
+        disruptorActive = true;
+        disruptorTimer = 900; // 15s at 60fps
+        disruptors--;
+        window.disruptorKey = false;
+      }
+      if (disruptorActive) {
+        disruptorTimer--;
+        if (disruptorTimer <= 0) disruptorActive = false;
+      }
+    }
+
+    // Background scrolling land (green and dark green stripes)
+    let bgOffset = 0;
+    function drawBackground() {
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+    }
+
+    function draw() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      drawBackground();
+      // Player (fighter jet)
+      if (player.alive) {
+        ctx.save();
+        ctx.translate(player.x + player.w/2, player.y + player.h/2);
+        ctx.scale(1.2, 1.2);
+        ctx.beginPath();
+        ctx.moveTo(0, -18); // nose
+        ctx.lineTo(-18, 18); // left wing
+        ctx.lineTo(-6, 10); // left body
+        ctx.lineTo(-3, 18); // left tail
+        ctx.lineTo(0, 12); // center tail
+        ctx.lineTo(3, 18); // right tail
+        ctx.lineTo(6, 10); // right body
+        ctx.lineTo(18, 18); // right wing
+        ctx.closePath();
+        ctx.fillStyle = disruptorActive ? '#222' : '#0ff';
+        ctx.globalAlpha = disruptorActive ? 0.7 : 1;
+        ctx.fill();
+        ctx.globalAlpha = 1;
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.restore();
+      } else {
+        ctx.save();
+        ctx.font = 'bold 60px sans-serif';
+        ctx.fillStyle = '#fff';
+        ctx.textAlign = 'center';
+        ctx.fillText('GAME OVER', canvas.width/2, canvas.height/2);
+        ctx.font = '32px sans-serif';
+        ctx.fillStyle = '#0ff';
+        ctx.fillText('Press refresh to restart', canvas.width/2, canvas.height/2 + 60);
+        ctx.restore();
+      }
+      // Missiles (player and enemy)
+      for (const m of missiles) {
+        ctx.save();
+        ctx.translate(m.x + m.w/2, m.y + m.h/2);
+        if (m.isFragment) {
+          ctx.rotate(Math.atan2(m.vy, m.vx));
+          ctx.beginPath();
+          ctx.arc(0, 0, 7, 0, 2 * Math.PI);
+          ctx.fillStyle = '#ff0';
+          ctx.fill();
+          ctx.strokeStyle = '#fff';
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        } else {
+          ctx.rotate(m.fromPlayer ? -Math.PI/2 : Math.PI/2);
+          ctx.beginPath();
+          ctx.moveTo(-m.h/2, -m.w/2);
+          ctx.lineTo(m.h/2, 0);
+          ctx.lineTo(-m.h/2, m.w/2);
+          ctx.closePath();
+          ctx.fillStyle = m.homing ? '#0f0' : m.color;
+          ctx.fill();
+          ctx.strokeStyle = '#fff';
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+      // Enemies (planes)
+      for (const e of enemies) {
+        if (!e.alive) continue;
+        ctx.save();
+        ctx.translate(e.x + e.w/2, e.y + e.h/2);
+        ctx.scale(1.2, 1.2);
+        // Damage color: interpolate from #f44 to #222 as hp drops
+        let hpRatio = e.hp / e.maxHp;
+        let r = Math.round(244 * hpRatio + 34 * (1 - hpRatio));
+        let g = Math.round(68 * hpRatio + 34 * (1 - hpRatio));
+        let b = Math.round(68 * hpRatio + 34 * (1 - hpRatio));
+        ctx.beginPath();
+        ctx.moveTo(0, -18); // nose
+        ctx.lineTo(-18, 18); // left wing
+        ctx.lineTo(-6, 10); // left body
+        ctx.lineTo(-3, 18); // left tail
+        ctx.lineTo(0, 12); // center tail
+        ctx.lineTo(3, 18); // right tail
+        ctx.lineTo(6, 10); // right body
+        ctx.lineTo(18, 18); // right wing
+        ctx.closePath();
+        ctx.fillStyle = `rgb(${r},${g},${b})`;
+        ctx.fill();
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        // Fire/smoke: more intense as hp drops
+        let fireCount = Math.ceil((1 - hpRatio) * 7);
+        if (e.onFire) fireCount = Math.max(fireCount, 5); // always at least 5 fire blobs if onFire
+        for (let f = 0; f < fireCount; f++) {
+          let fx = (Math.random() - 0.5) * 18;
+          let fy = 10 + Math.random() * 10;
+          let fireAlpha = 0.5 + 0.5 * (1 - hpRatio);
+          ctx.beginPath();
+          ctx.arc(fx, fy, 5 + Math.random() * 5 * (1 - hpRatio), 0, 2 * Math.PI);
+          ctx.fillStyle = `rgba(255,${Math.floor(120 + Math.random()*80)},0,${fireAlpha})`;
+          ctx.fill();
+        }
+        // Smoke: more as hp drops
+        let smokeCount = Math.ceil((1 - hpRatio) * 4);
+        if (e.onFire) smokeCount = Math.max(smokeCount, 3); // always at least 3 smoke blobs if onFire
+        for (let s = 0; s < smokeCount; s++) {
+          let sx = (Math.random() - 0.5) * 18;
+          let sy = 18 + Math.random() * 10;
+          let smokeAlpha = 0.2 + 0.4 * (1 - hpRatio);
+          ctx.beginPath();
+          ctx.arc(sx, sy, 7 + Math.random() * 6 * (1 - hpRatio), 0, 2 * Math.PI);
+          ctx.fillStyle = `rgba(80,80,80,${smokeAlpha})`;
+          ctx.fill();
+        }
+        ctx.restore();
+      }
+      // Power-ups
+      for (const p of powerUps) {
+        ctx.save();
+        ctx.translate(p.x, p.y);
+        // Draw colored box with white outline and text
+        if (p.type === 'rapid') {
+          ctx.fillStyle = '#1e90ff'; // blue
+        } else if (p.type === 'missiles') {
+          ctx.fillStyle = '#ff8800'; // orange
+        } else if (p.type === 'homing') {
+          ctx.fillStyle = '#8e44ad'; // purple
+        }
+        ctx.fillRect(0, 0, p.w, p.h);
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(0, 0, p.w, p.h);
+        ctx.fillStyle = '#fff';
+        ctx.font = 'bold 10px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        let label = 'object identified: ';
+        if (p.type === 'rapid') label += 'rapid fire crate';
+        else if (p.type === 'missiles') label += '+missiles crate';
+        else if (p.type === 'homing') label += 'homing missile crate';
+        ctx.fillText(label, p.w/2, p.h/2);
+        ctx.restore();
+      }
+      // Draw boss
+      if (bossActive && boss && boss.alive) {
+        ctx.save();
+        ctx.translate(boss.x + boss.w/2, boss.y + boss.h/2);
+        ctx.scale(1.5, 1.5);
+        let hpRatio = boss.hp / boss.maxHp;
+        let r = Math.round(240 * hpRatio + 34 * (1 - hpRatio));
+        let g = Math.round(0 * hpRatio + 34 * (1 - hpRatio));
+        let b = Math.round(240 * hpRatio + 34 * (1 - hpRatio));
+        // Different plane-like shapes
+        if (boss.shape === 'diamond') {
+          // Plane1: wide diamond jet
+          ctx.beginPath();
+          ctx.moveTo(0, -40); // nose
+          ctx.lineTo(-80, 40); // left wing
+          ctx.lineTo(-30, 20); // left body
+          ctx.lineTo(-10, 40); // left tail
+          ctx.lineTo(0, 30); // center tail
+          ctx.lineTo(10, 40); // right tail
+          ctx.lineTo(30, 20); // right body
+          ctx.lineTo(80, 40); // right wing
+          ctx.closePath();
+        } else if (boss.shape === 'plane2') {
+          // Plane2: sleeker jet
+          ctx.beginPath();
+          ctx.moveTo(0, -50); // nose
+          ctx.lineTo(-60, 30); // left wing
+          ctx.lineTo(-20, 10); // left body
+          ctx.lineTo(-8, 40); // left tail
+          ctx.lineTo(0, 20); // center tail
+          ctx.lineTo(8, 40); // right tail
+          ctx.lineTo(20, 10); // right body
+          ctx.lineTo(60, 30); // right wing
+          ctx.closePath();
+        } else if (boss.shape === 'rectangle') {
+          // Plane3: heavy bomber
+          ctx.beginPath();
+          ctx.moveTo(0, -40); // nose
+          ctx.lineTo(-70, 30); // left wing
+          ctx.lineTo(-30, 20); // left body
+          ctx.lineTo(-20, 40); // left tail
+          ctx.lineTo(0, 35); // center tail
+          ctx.lineTo(20, 40); // right tail
+          ctx.lineTo(30, 20); // right body
+          ctx.lineTo(70, 30); // right wing
+          ctx.closePath();
+        } else {
+          // Default: original boss shape
+          ctx.beginPath();
+          ctx.moveTo(0, -40);
+          ctx.lineTo(-80, 40);
+          ctx.lineTo(-30, 20);
+          ctx.lineTo(-10, 40);
+          ctx.lineTo(0, 30);
+          ctx.lineTo(10, 40);
+          ctx.lineTo(30, 20);
+          ctx.lineTo(80, 40);
+          ctx.closePath();
+        }
+        ctx.fillStyle = boss.color;
+        ctx.globalAlpha = 0.7 + 0.3 * hpRatio;
+        ctx.shadowColor = '#fff';
+        ctx.shadowBlur = 20 * (1 - hpRatio);
+        ctx.fill();
+        ctx.shadowBlur = 0;
+        ctx.globalAlpha = 1;
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 4;
+        ctx.stroke();
+        // Fire/smoke: more intense as hp drops
+        let fireCount = Math.ceil((1 - hpRatio) * 10);
+        for (let f = 0; f < fireCount; f++) {
+          let fx = (Math.random() - 0.5) * 120;
+          let fy = 30 + Math.random() * 30;
+          let fireAlpha = 0.5 + 0.5 * (1 - hpRatio);
+          ctx.beginPath();
+          ctx.arc(fx, fy, 12 + Math.random() * 10 * (1 - hpRatio), 0, 2 * Math.PI);
+          ctx.fillStyle = `rgba(255,${Math.floor(120 + Math.random()*80)},0,${fireAlpha})`;
+          ctx.fill();
+        }
+        let smokeCount = Math.ceil((1 - hpRatio) * 6);
+        for (let s = 0; s < smokeCount; s++) {
+          let sx = (Math.random() - 0.5) * 120;
+          let sy = 40 + Math.random() * 30;
+          let smokeAlpha = 0.2 + 0.4 * (1 - hpRatio);
+          ctx.beginPath();
+          ctx.arc(sx, sy, 18 + Math.random() * 12 * (1 - hpRatio), 0, 2 * Math.PI);
+          ctx.fillStyle = `rgba(80,80,80,${smokeAlpha})`;
+          ctx.fill();
+        }
+        // Boss name
+        ctx.font = 'bold 32px sans-serif';
+        ctx.fillStyle = '#fff';
+        ctx.textAlign = 'center';
+        ctx.fillText(boss.name, 0, -70);
+        ctx.restore();
+      }
+      // UI: show firing instructions, homing, score, wave, and disruptor at top left
+      ctx.save();
+      ctx.font = '20px sans-serif';
+      ctx.fillStyle = '#fff';
+      ctx.textAlign = 'left';
+      ctx.fillText('Missiles: Space or Left Click to fire', 20, 30);
+      ctx.fillStyle = '#0f0';
+      ctx.fillText('Homing Missiles: ' + player.homingMissiles + ' (press H or Right Click)', 20, 60);
+      ctx.fillStyle = '#ff0';
+      ctx.fillText('Score: ' + score, 20, 90);
+      ctx.fillStyle = '#0ff';
+      ctx.fillText('Wave: ' + wave, 20, 120);
+      ctx.fillStyle = '#aaa';
+      ctx.fillText('Disruptors: ' + disruptors + ' (press Q to activate)', 20, 150);
+      if (disruptorActive) {
+        ctx.fillStyle = '#aaa';
+        ctx.fillText('Missile-proof: ' + Math.ceil(disruptorTimer/60) + 's', 20, 180);
+      }
+      ctx.restore();
+    }
+
+    function gameLoop() {
+      if (!paused) {
+        update();
+        draw();
+      } else {
+        // Draw pause overlay
+        draw();
+        ctx.save();
+        ctx.globalAlpha = 0.7;
+        ctx.fillStyle = '#222';
+        ctx.fillRect(canvas.width/2-180, canvas.height/2-80, 360, 160);
+        ctx.globalAlpha = 1;
+        ctx.font = 'bold 60px sans-serif';
+        ctx.fillStyle = '#fff';
+        ctx.textAlign = 'center';
+        ctx.fillText('PAUSED', canvas.width/2, canvas.height/2);
+        ctx.font = '28px sans-serif';
+        ctx.fillText('Click Resume to continue', canvas.width/2, canvas.height/2+50);
+        ctx.restore();
+      }
+      requestAnimationFrame(gameLoop);
+    }
+    gameLoop();
+  </script>
+</body>
+</html>
